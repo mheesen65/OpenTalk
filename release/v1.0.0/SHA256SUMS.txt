@@ -1,0 +1,2 @@
+6cfadfdfb3c6499bb2b0c92c31a78c546b57c2ab14d5468cf077a80daa33c390  OpenTalk-1.0.0-portable.zip
+fb42074bc0d908694f465f3ab392fd774a455e51ddd367015b8d6c6242bfdc65  OpenTalk-1.0.0-source.zip
