@@ -1,0 +1,39 @@
+# Build trees
+build/
+build-*/
+out/
+dist/
+cmake-build-*/
+
+# CMake / CPack
+CMakeCache.txt
+CMakeFiles/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+_CPack_Packages/
+install_manifest.txt
+
+# Qt
+*.moc
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+.qmake.stash
+
+# IDE / editor
+.vscode/
+.idea/
+*.user
+*.user.*
+*.sln
+*.vcxproj*
+*.pro.user*
+.cache/
+compile_commands.json
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
