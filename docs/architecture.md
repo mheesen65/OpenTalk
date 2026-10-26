@@ -7,27 +7,26 @@
   OpenTalkClient  <------------------------------>  OpenTalkServer
         |                                                  |
         +------------------> OpenTalkSDK <-----------------+
-                       (protocol + framing + Connection)
+     (protocol, audio, transfer, connection)
 ```
 
 Three targets, one shared library:
 
-- **`OpenTalkSDK`** (`sdk/`) — the contract. Owns message types, JSON
-  serialisation, framing and a `Connection` wrapper that turns a byte stream
-  into message objects. Any third-party app can link it to become an OpenTalk
-  client or server.
-- **`OpenTalkServer`** (`server/`) — headless, `QCoreApplication`. Accepts
-  connections, tracks identity and channel membership, and relays text, voice
-  and file payloads between members of a channel.
+- **`OpenTalkSDK`** (`sdk/`) — the contract. Message types, JSON serialisation,
+  framing, `Connection`, the Opus codec wrappers, `VoiceReceiver` (jitter +
+  mixing) and the file-transfer state machines. A third-party client or bot
+  links only this.
+- **`OpenTalkServer`** (`server/`) — headless, `QCoreApplication`. Identity,
+  channels, relay, rate limits and timeouts. It decodes nothing: audio and file
+  payloads are opaque to it, which keeps the server cheap and codec-agnostic.
 - **`OpenTalkClient`** (`client/`) — `QApplication` + Widgets. Talks only
-  through the SDK; it never touches sockets directly.
+  through the SDK; it never touches a socket directly.
 
 Dependency direction is strictly one way: `client` and `server` depend on the
-SDK, never the reverse.
+SDK, never the reverse. Opus is hidden behind `AudioEncoder`/`AudioDecoder` so
+no public header includes third-party types.
 
 ## Wire format
-
-Every frame is:
 
 | Bytes | Content |
 | --- | --- |
@@ -36,99 +35,122 @@ Every frame is:
 | 5.. | UTF-8 JSON object body |
 
 Frames above `kMaxFrameSize` (4 MiB) cause an immediate disconnect: once a
-length prefix is wrong, the stream cannot be resynchronised, so guessing is
-worse than dropping the connection.
+length prefix is wrong the stream cannot be resynchronised, so guessing is
+worse than dropping the connection. Media payloads (`data`) are base64 inside
+the JSON envelope — a deliberate trade of ~33% overhead for debuggability and
+one parsing path. Moving voice to binary frames is a future optimisation.
 
-JSON was chosen for the control channel because it is debuggable with nothing
-more than `tcpdump` and a text editor, and because the SDK can relay message
-types it does not understand yet. Voice and file chunks are the exception —
-they will move to raw binary frames later (see Roadmap).
-
-`Hello` must be the first message; the server rejects anything else and closes
-the connection. The server refuses mismatched `kProtocolVersion` at handshake
-rather than failing in subtle ways mid-session.
+`Hello` must be the first message; anything else is refused and the connection
+closed. A mismatched `kProtocolVersion` is rejected at handshake rather than
+failing subtly later.
 
 ## Messages
 
 | Type | Direction | Purpose |
 | --- | --- | --- |
-| `Hello` / `Welcome` | client → server / server → client | Handshake: nickname and protocol version in, user id and server name out |
+| `Hello` / `Welcome` | client → server / server → client | Handshake: nickname and version in, user id and server name out |
 | `Error` | server → client | Machine-readable `code` plus human `description` |
-| `Ping` / `Pong` | both | Liveness, nonce echoed back |
-| `ChannelList` | server → client | All channels with user counts |
+| `Ping` / `Pong` | both | Liveness; nonce echoed back |
+| `ChannelList` | server → client | Channels with live user counts |
 | `JoinChannel` / `LeaveChannel` | client → server | Membership changes |
 | `UserList` | server → client | Full roster of one channel |
 | `UserJoined` / `UserLeft` | server → client | Incremental roster updates |
-| `TextMessage` | both | Chat; server stamps sender identity and timestamp |
-| `VoiceFrame` | both | Relay of one encoded audio packet |
-| `FileOffer` / `FileResponse` / `FileChunk` / `FileComplete` | both | Relay of a peer-to-peer transfer |
+| `TextMessage` | both | Chat; server stamps sender and timestamp |
+| `VoiceFrame` | both | One Opus packet: `seq`, `timestamp`, `codec`, base64 `data` |
+| `FileOffer` | both | Metadata: transfer id, name, size, SHA-256, chunk size |
+| `FileResponse` | both | Accept/decline with reason |
+| `FileChunk` | both | Ordered chunk: `index`, `last`, base64 `data` |
+| `FileComplete` | both | Success or failure with reason |
 
 Trust boundary: the server **never** trusts a client-supplied sender id,
 nickname or channel on relayed messages. It overwrites all three from the
-session before forwarding, which is why a modified client cannot impersonate
-another user or inject into a channel it has not joined.
+session before forwarding, so a modified client cannot impersonate another user
+or inject into a channel it has not joined. File names are reduced to their
+basename before relay, chunk indices and sizes are bounded, and text is
+truncated to the configured limit.
 
 ## Threading
 
-The server is single-threaded by design. One event loop multiplexes all
-sockets; per-connection handlers only do cheap work (parse, look up, write).
-For the 50-200 user target this is comfortably enough, and it removes an entire
-class of races from channel membership.
+Single event loop. Per-connection handlers only parse, look up and write; no
+blocking work happens on the loop. For the 50–200 user target this removes an
+entire class of races in channel state.
 
-The expected scaling path, when needed, is *not* to add a thread per
-connection but to shard channels across worker threads with an explicit message
-queue, keeping each channel's state owned by exactly one thread.
+Scaling path, when needed: shard channels across worker threads with an
+explicit queue, keeping each channel's state owned by one thread — not a thread
+per connection.
 
-## Voice pipeline (planned)
+## Audio pipeline
 
-Not implemented yet; the button in the client is deliberately inert.
+1. Capture: `QAudioSource` at 48 kHz mono, 16-bit.
+2. Frame into 960-sample (20 ms) blocks; encode with Opus at 28 kbps, VOIP mode,
+   in-band FEC on, DTX on.
+3. Each packet carries a per-sender sequence and capture timestamp.
+4. Server fans out to the rest of the channel. No mixing server-side.
+5. Receive: `VoiceReceiver` keeps one jitter buffer **and** one Opus decoder per
+   sender (decoder state is per stream), pops one packet per 20 ms tick,
+   conceals gaps via Opus PLC, and sums the decoded frames with clamping into a
+   single PCM frame for `QAudioSink`.
 
-1. Capture at 48 kHz mono (Qt Multimedia `QAudioSource`).
-2. Frame into 20 ms blocks, encode with Opus at 24-32 kbps.
-3. Send one `VoiceFrame` per packet (binary frame, not base64 JSON).
-4. Server fans out to other channel members; no mixing for small channels.
-5. Client decodes and feeds a jitter buffer keyed on sequence numbers, then
-   plays through `QAudioSink`.
+Push-to-talk and mute gate transmission at the capture stage, so nothing is
+encoded or sent while the user is silent. Playback keeps a bounded queue
+(≈500 ms) and drops the oldest audio rather than growing memory if the device
+stalls.
 
-Two open design questions: whether the server mixes per channel once channel
-sizes grow, and whether to add a UDP path for latency-sensitive media while
-keeping TCP for control.
+Device I/O is the only untested-by-CI part: codecs, jitter buffering and mixing
+are unit-tested, but opening a real microphone needs hardware.
 
-## File transfer (planned)
+## File transfer
 
-The protocol already defines offer/response/chunk/complete, and the server
-relays them with size caps. What is missing is durability:
+Relay-only, peer to peer through the server:
 
-- Offers are relayed but not persisted, so a recipient must be online.
-- Files are not stored server-side, so there is no resumable download.
-- The planned `--data-dir` option will hold per-channel uploads with quotas and
-  an eviction policy; chunking then optionally routes through the server.
+1. Sender computes SHA-256 while opening the file, sends `FileOffer`.
+2. Server sanitises the filename and rebroadcasts within the channel.
+3. Each recipient may accept (`FileResponse`) and pick a local path; the sender
+   streams 64 KiB chunks to anyone who accepted.
+4. Receiver enforces order, bounds and declared size; on `last` it verifies the
+   SHA-256 and deletes the partial file on mismatch.
+5. Both sides exchange `FileComplete` so failures are visible, not silent.
 
-## Portable packaging
+Limits of this design, stated plainly: the recipient must be online, nothing is
+stored server-side, and there is no resume. A store-and-forward mode with
+per-channel quotas is the next step and needs a data directory and eviction
+policy.
 
-The target is extraction-to-running with no installer and no administrator
-rights:
+## Hardening
 
-- `scripts/package_windows.ps1` builds Release, stages via CMake install,
-  copies the Qt runtime next to the executables with `windeployqt`, then zips.
-- `scripts/package_linux.sh` does the same natively, bundling non-system Qt
-  libraries resolved with `ldd`.
-- `cpack -G ZIP` produces a bare archive of the installed tree.
+| Control | Value |
+| --- | --- |
+| Frame ceiling | 4 MiB, connection dropped |
+| Frames per second per session | 400 |
+| Bytes per second per session | 2 MiB |
+| Handshake timeout | 15 s, then disconnect |
+| Heartbeat / idle timeout | ping every 15 s / drop after 90 s |
+| Voice payload | 8 KiB |
+| File chunk | 256 KiB |
+| Text | 4000 characters |
+| Nickname | 32 characters, control characters stripped, duplicates suffixed |
 
-Nothing writes to the registry, `Program Files`, `/etc`, or installs a service.
-The server keeps all state in memory for now; once file transfer lands it will
-need a data directory next to the executable and a documented config file.
+Ratings are checked as bytes arrive, before parsing, so malformed floods cost
+almost nothing.
 
-Because the project is GPL-3.0 and Qt is LGPLv3, **Qt must stay dynamically
-linked** — which the packaging above does. A truly single-file executable would
-require a commercial Qt licence or a different toolkit; that trade-off is
-recorded here rather than hidden.
+## Packaging
+
+`scripts/package_windows.ps1` builds Release, stages via CMake install, deploys
+the Qt runtime with `windeployqt`, copies `opus.dll`, and zips flat.
+`scripts/package_linux.sh` does the same natively: bundles `libQt6*`, the SDK,
+ICU and Opus, copies the `platforms`/`imageformats`/`iconengines`/`tls`/
+`multimedia` plugins, writes `qt.conf`, and relies on the `$ORIGIN` rpath set in
+CMake so extracted binaries resolve their own directory.
+
+No registry writes, no services, no administrator rights. Because the project is
+GPL-3.0 and Qt is LGPLv3, Qt stays **dynamically linked**; a single-file static
+build would need a commercial Qt licence. That trade-off is recorded rather
+than hidden.
 
 ## Roadmap
 
-1. **Now** — protocol, framing, server relay, client shell, tests, packaging.
-2. **Audio** — Opus capture/playback, jitter buffer, push-to-talk, mute.
-3. **File transfer** — durable offers, resumable transfers, quotas.
-4. **Identity** — optional accounts, channel permissions, moderation.
-5. **Scale** — binary media frames, optional UDP media, channel sharding.
-6. **Portability** — Linux and macOS client builds, headless server container.
+1. **TLS** with certificate pinning or a trust-on-first-use prompt.
+2. **Store-and-forward files** with quotas and resume.
+3. **Identity**: accounts, channel permissions, moderation.
+4. **Scale**: binary media frames, optional UDP media, channel sharding.
+5. **Platforms**: macOS packaging, container image for the server.

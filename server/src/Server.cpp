@@ -1,10 +1,14 @@
 #include "Server.h"
 
+#include <QDateTime>
 #include <QDebug>
+#include <QFileInfo>
 #include <QHostAddress>
 #include <QRegularExpression>
+#include <QSet>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QtEndian>
 
 #include <utility>
@@ -45,7 +49,8 @@ bool Server::start()
 {
     m_tcp = new QTcpServer(this);
     if (!m_tcp->listen(QHostAddress::Any, m_config.port)) {
-        qCritical() << "Cannot listen on port" << m_config.port << ":" << m_tcp->errorString();
+        qCritical().noquote() << "Cannot listen on port" << m_config.port << ":"
+                              << m_tcp->errorString();
         return false;
     }
 
@@ -74,12 +79,70 @@ bool Server::start()
         }
     });
 
+    m_heartbeat = new QTimer(this);
+    m_heartbeat->setInterval(m_config.heartbeatIntervalMs);
+    connect(m_heartbeat, &QTimer::timeout, this, &Server::tick);
+    m_heartbeat->start();
+
     return true;
 }
 
 quint16 Server::port() const
 {
     return m_tcp ? m_tcp->serverPort() : 0;
+}
+
+void Server::stop(const QString &reason)
+{
+    if (m_stopping) {
+        return;
+    }
+    m_stopping = true;
+
+    if (m_heartbeat != nullptr) {
+        m_heartbeat->stop();
+    }
+    if (m_tcp != nullptr) {
+        m_tcp->close();
+    }
+
+    const Message notice = messages::error(
+        QStringLiteral("server-shutdown"),
+        reason.isEmpty() ? QStringLiteral("The server is shutting down.") : reason);
+    for (ClientSession *session : m_sessions) {
+        session->send(notice);
+        session->closeAfterFlush();
+    }
+    qInfo() << "Server stopping:" << m_sessions.size() << "session(s) notified";
+}
+
+void Server::tick()
+{
+    if (m_stopping) {
+        return;
+    }
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (ClientSession *session : m_sessions) {
+        if (!session->authenticated()) {
+            if (session->ageMs() > m_config.handshakeTimeoutMs) {
+                session->send(messages::error(
+                    QStringLiteral("handshake-timeout"),
+                    QStringLiteral("No Hello message within the handshake window.")));
+                session->closeAfterFlush();
+            }
+            continue;
+        }
+
+        if (now - session->lastActivityMs() > m_config.idleTimeoutMs) {
+            session->send(messages::error(QStringLiteral("idle-timeout"),
+                                          QStringLiteral("No activity; closing the session.")));
+            session->closeAfterFlush();
+            continue;
+        }
+
+        session->send(messages::ping(m_pingNonce++));
+    }
 }
 
 quint32 Server::nextUserId()
@@ -171,13 +234,17 @@ void Server::announceDeparture(ClientSession *session)
     }
 }
 
-void Server::reject(ClientSession *session, const QString &code, const QString &description)
+void Server::reject(ClientSession *session, const QString &code,
+                    const QString &description)
 {
     session->send(messages::error(code, description));
 }
 
 void Server::removeSession(ClientSession *session)
 {
+    if (!m_sessions.contains(session->id())) {
+        return;
+    }
     announceDeparture(session);
     m_sessions.remove(session->id());
     qInfo().noquote() << QStringLiteral("Session %1 disconnected").arg(session->id());
@@ -212,8 +279,24 @@ void Server::handleMessage(ClientSession *session, const Message &message)
             return;
         }
 
-        session->setNickname(sanitiseNickname(
-            message.body.value(QLatin1String("nickname")).toString(), session->id()));
+        QString nickname = sanitiseNickname(
+            message.body.value(QLatin1String("nickname")).toString(), session->id());
+
+        // Two "alex" in one server makes moderation and chat attribution
+        // ambiguous, so disambiguate rather than reject.
+        QSet<QString> taken;
+        for (ClientSession *other : m_sessions) {
+            if (other != session && other->authenticated()) {
+                taken.insert(other->nickname().toLower());
+            }
+        }
+        const QString base = nickname;
+        int suffix = 2;
+        while (taken.contains(nickname.toLower())) {
+            nickname = QStringLiteral("%1-%2").arg(base).arg(suffix++);
+        }
+
+        session->setNickname(nickname);
         session->setAuthenticated(true);
         session->setChannelId(0);
 
@@ -282,8 +365,7 @@ void Server::handleMessage(ClientSession *session, const Message &message)
             return;
         }
 
-        QString text = message.body.value(QLatin1String("text")).toString();
-        text = text.trimmed();
+        QString text = message.body.value(QLatin1String("text")).toString().trimmed();
         if (text.isEmpty()) {
             return;
         }
@@ -298,43 +380,118 @@ void Server::handleMessage(ClientSession *session, const Message &message)
         return;
     }
 
-    case MessageType::VoiceFrame:
-    case MessageType::FileOffer:
-    case MessageType::FileResponse:
-    case MessageType::FileChunk:
-    case MessageType::FileComplete: {
+    case MessageType::VoiceFrame: {
         const quint32 channelId = session->channelId();
         if (channelId == 0) {
             reject(session, QStringLiteral("not-in-channel"),
-                   QStringLiteral("Join a channel before sending media."));
+                   QStringLiteral("Join a channel before sending audio."));
             return;
         }
 
-        Message relay = message;
-        // The server owns channel and sender identity for relayed payloads.
-        relay.body.insert(QLatin1String("channel"), static_cast<qint64>(channelId));
-        relay.body.insert(QLatin1String("senderId"), static_cast<qint64>(session->id()));
-        relay.body.insert(QLatin1String("sender"), session->nickname());
-
-        if (message.type == MessageType::VoiceFrame) {
-            const int payloadSize =
-                message.body.value(QLatin1String("data")).toString().size();
-            if (payloadSize > m_config.maxVoicePayloadBytes * 4 / 3 + 8) {
-                reject(session, QStringLiteral("voice-too-large"),
-                       QStringLiteral("Voice payload exceeds the limit."));
-                return;
-            }
-        } else if (message.type == MessageType::FileChunk) {
-            const int payloadSize =
-                message.body.value(QLatin1String("data")).toString().size();
-            if (payloadSize > m_config.maxFileChunkBytes * 4 / 3 + 8) {
-                reject(session, QStringLiteral("chunk-too-large"),
-                       QStringLiteral("File chunk exceeds the limit."));
-                return;
-            }
+        VoicePacket packet = VoicePacket::fromJson(message.body);
+        if (packet.payload.isEmpty()) {
+            return;
+        }
+        if (packet.payload.size() > m_config.maxVoicePayloadBytes) {
+            reject(session, QStringLiteral("voice-too-large"),
+                   QStringLiteral("Voice payload exceeds %1 bytes.")
+                       .arg(m_config.maxVoicePayloadBytes));
+            return;
         }
 
-        broadcastChannel(channelId, relay, session);
+        packet.channelId = channelId;
+        packet.senderId = session->id();
+        packet.sender = session->nickname();
+        broadcastChannel(channelId, messages::voice(packet), session);
+        return;
+    }
+
+    case MessageType::FileOffer: {
+        const quint32 channelId = session->channelId();
+        if (channelId == 0) {
+            reject(session, QStringLiteral("not-in-channel"),
+                   QStringLiteral("Join a channel before sending files."));
+            return;
+        }
+
+        FileOffer offer = FileOffer::fromJson(message.body);
+        if (offer.transferId.isEmpty()) {
+            reject(session, QStringLiteral("invalid-offer"),
+                   QStringLiteral("File offer is missing a transfer id."));
+            return;
+        }
+        if (offer.fileSize < 0) {
+            reject(session, QStringLiteral("invalid-offer"),
+                   QStringLiteral("File offer has a negative size."));
+            return;
+        }
+
+        // A file name is not a path: strip any directory component and
+        // separators so a peer cannot steer where the receiver writes.
+        const QString cleanName = QFileInfo(offer.fileName).fileName().trimmed();
+        if (cleanName.isEmpty() || cleanName == QStringLiteral(".")) {
+            reject(session, QStringLiteral("invalid-offer"),
+                   QStringLiteral("File offer has an unusable name."));
+            return;
+        }
+        offer.fileName = cleanName;
+
+        if (offer.chunkSize <= 0 || offer.chunkSize > m_config.maxFileChunkBytes) {
+            offer.chunkSize = qMin(m_config.maxFileChunkBytes, kDefaultChunkSize);
+        }
+
+        offer.channelId = channelId;
+        offer.senderId = session->id();
+        offer.sender = session->nickname();
+        broadcastChannel(channelId, messages::fileOffer(offer), session);
+        return;
+    }
+
+    case MessageType::FileChunk: {
+        const quint32 channelId = session->channelId();
+        if (channelId == 0) {
+            reject(session, QStringLiteral("not-in-channel"),
+                   QStringLiteral("Join a channel before sending files."));
+            return;
+        }
+
+        FileChunk chunk = FileChunk::fromJson(message.body);
+        if (chunk.transferId.isEmpty()) {
+            reject(session, QStringLiteral("invalid-chunk"),
+                   QStringLiteral("File chunk is missing a transfer id."));
+            return;
+        }
+        if (chunk.data.size() > m_config.maxFileChunkBytes) {
+            reject(session, QStringLiteral("chunk-too-large"),
+                   QStringLiteral("File chunk exceeds %1 bytes.")
+                       .arg(m_config.maxFileChunkBytes));
+            return;
+        }
+
+        chunk.senderId = session->id();
+        broadcastChannel(channelId, messages::fileChunk(chunk), session);
+        return;
+    }
+
+    case MessageType::FileResponse:
+    case MessageType::FileComplete: {
+        const quint32 channelId = session->channelId();
+        if (channelId == 0) {
+            return;
+        }
+        if (message.type == MessageType::FileResponse) {
+            FileResponse response = FileResponse::fromJson(message.body);
+            if (response.transferId.isEmpty()) {
+                return;
+            }
+            broadcastChannel(channelId, messages::fileResponse(response), session);
+        } else {
+            FileComplete complete = FileComplete::fromJson(message.body);
+            if (complete.transferId.isEmpty()) {
+                return;
+            }
+            broadcastChannel(channelId, messages::fileComplete(complete), session);
+        }
         return;
     }
 
@@ -346,20 +503,26 @@ void Server::handleMessage(ClientSession *session, const Message &message)
 
     default:
         reject(session, QStringLiteral("unknown-message"),
-               QStringLiteral("Unsupported message type %1.").arg(static_cast<int>(message.type)));
+               QStringLiteral("Unsupported message type %1.")
+                   .arg(static_cast<int>(message.type)));
         return;
     }
 }
 
 // --------------------------------------------------------- ClientSession ---
 
-ClientSession::ClientSession(QTcpSocket *socket, Server *server, quint32 id, QObject *parent)
+ClientSession::ClientSession(QTcpSocket *socket, Server *server, quint32 id,
+                             QObject *parent)
     : QObject(parent)
     , m_server(server)
     , m_socket(socket)
     , m_id(id)
 {
     m_socket->setParent(this);
+    m_lifetime.start();
+    m_rateWindow.start();
+    m_lastActivityMs = QDateTime::currentMSecsSinceEpoch();
+
     connect(m_socket, &QTcpSocket::readyRead, this, &ClientSession::handleReadyRead);
     connect(m_socket, &QTcpSocket::disconnected, this, &ClientSession::handleDisconnected);
 }
@@ -376,6 +539,27 @@ void ClientSession::send(const Message &message)
 void ClientSession::closeAfterFlush()
 {
     m_socket->disconnectFromHost();
+}
+
+QAbstractSocket::SocketState ClientSession::socketState() const
+{
+    return m_socket->state();
+}
+
+bool ClientSession::consumeBudget(int bytes)
+{
+    if (m_rateWindow.elapsed() >= 1000) {
+        m_rateWindow.restart();
+        m_framesInWindow = 0;
+        m_bytesInWindow = 0;
+    }
+
+    ++m_framesInWindow;
+    m_bytesInWindow += bytes;
+
+    const ServerConfig &config = m_server->config();
+    return m_framesInWindow <= config.maxFramesPerSecond
+        && m_bytesInWindow <= config.maxBytesPerSecond;
 }
 
 void ClientSession::handleReadyRead()
@@ -407,6 +591,14 @@ void ClientSession::processBuffer()
 
         const QByteArray payload = m_buffer.mid(4, static_cast<int>(length));
         m_buffer.remove(0, totalSize);
+
+        if (!consumeBudget(totalSize)) {
+            send(messages::error(QStringLiteral("rate-limited"),
+                                 QStringLiteral("Too many frames; closing the connection.")));
+            m_socket->disconnectFromHost();
+            return;
+        }
+        m_lastActivityMs = QDateTime::currentMSecsSinceEpoch();
 
         Message message;
         if (!decodeFrame(payload, message)) {

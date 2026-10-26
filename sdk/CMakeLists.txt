@@ -1,8 +1,12 @@
 add_library(opentalk_sdk SHARED
     include/opentalk/protocol.h
     include/opentalk/connection.h
+    include/opentalk/audio.h
+    include/opentalk/transfer.h
     src/protocol.cpp
-    src/connection.cpp)
+    src/connection.cpp
+    src/audio.cpp
+    src/transfer.cpp)
 
 add_library(OpenTalk::SDK ALIAS opentalk_sdk)
 
@@ -10,7 +14,7 @@ target_include_directories(opentalk_sdk PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
-target_link_libraries(opentalk_sdk PUBLIC Qt6::Core Qt6::Network)
+target_link_libraries(opentalk_sdk PUBLIC Qt6::Core Qt6::Network OpenTalk::Opus)
 
 target_compile_definitions(opentalk_sdk PRIVATE OPENTALK_SDK_LIBRARY)
 

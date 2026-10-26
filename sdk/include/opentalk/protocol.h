@@ -21,6 +21,18 @@ inline constexpr quint32 kMaxFrameSize = 4u * 1024u * 1024u;
 
 inline constexpr quint32 kDefaultChannelId = 1;
 
+// --- Audio parameters -------------------------------------------------------
+// One fixed format everywhere keeps the server free of transcoding.
+inline constexpr int kAudioSampleRate = 48000;
+inline constexpr int kAudioChannels = 1;
+inline constexpr int kAudioFrameMs = 20;
+inline constexpr int kAudioSamplesPerFrame = kAudioSampleRate * kAudioFrameMs / 1000;
+inline constexpr int kAudioBytesPerFrame = kAudioSamplesPerFrame * 2;
+inline constexpr int kDefaultOpusBitrate = 28000;
+
+/// Default raw bytes per file chunk (base64 expands this by 4/3 on the wire).
+inline constexpr int kDefaultChunkSize = 64 * 1024;
+
 /// Every frame starts with a 4-byte big-endian payload length, then one type
 /// byte, then the JSON body. See docs/architecture.md.
 enum class MessageType : quint8 {
@@ -97,6 +109,65 @@ struct TextEvent {
     static TextEvent fromJson(const QJsonObject &json);
 };
 
+/// One encoded audio packet. `sequence` is a per-sender counter used by the
+/// jitter buffer; `timestampMs` is the sender's capture time.
+struct VoicePacket {
+    quint32 channelId{0};
+    quint32 senderId{0};
+    QString sender;
+    quint32 sequence{0};
+    qint64 timestampMs{0};
+    QByteArray payload; // one Opus packet
+
+    QJsonObject toJson() const;
+    static VoicePacket fromJson(const QJsonObject &json);
+};
+
+/// Metadata for an offered file. The SHA-256 lets the receiver detect
+/// corruption; the transfer id ties chunks to their offer.
+struct FileOffer {
+    QString transferId;
+    quint32 channelId{0};
+    quint32 senderId{0};
+    QString sender;
+    QString fileName;
+    qint64 fileSize{0};
+    QString sha256;
+    int chunkSize{kDefaultChunkSize};
+
+    QJsonObject toJson() const;
+    static FileOffer fromJson(const QJsonObject &json);
+};
+
+struct FileResponse {
+    QString transferId;
+    bool accepted{false};
+    QString reason;
+
+    QJsonObject toJson() const;
+    static FileResponse fromJson(const QJsonObject &json);
+};
+
+struct FileChunk {
+    QString transferId;
+    quint32 senderId{0};
+    quint32 index{0};
+    bool last{false};
+    QByteArray data;
+
+    QJsonObject toJson() const;
+    static FileChunk fromJson(const QJsonObject &json);
+};
+
+struct FileComplete {
+    QString transferId;
+    bool success{true};
+    QString reason;
+
+    QJsonObject toJson() const;
+    static FileComplete fromJson(const QJsonObject &json);
+};
+
 /// Serialises a message into a length-prefixed frame ready for socket write.
 QByteArray encodeFrame(const Message &message);
 
@@ -123,6 +194,13 @@ Message userLeft(quint32 userId, quint32 channelId);
 Message text(quint32 channelId, quint32 senderId, const QString &sender,
              const QString &text, qint64 timestampMs = 0);
 
+Message voice(const VoicePacket &packet);
+
+Message fileOffer(const FileOffer &offer);
+Message fileResponse(const FileResponse &response);
+Message fileChunk(const FileChunk &chunk);
+Message fileComplete(const FileComplete &complete);
+
 Message ping(quint32 nonce);
 Message pong(quint32 nonce);
 
@@ -132,3 +210,4 @@ Message pong(quint32 nonce);
 Q_DECLARE_METATYPE(opentalk::Message)
 Q_DECLARE_METATYPE(opentalk::UserInfo)
 Q_DECLARE_METATYPE(opentalk::ChannelInfo)
+Q_DECLARE_METATYPE(opentalk::VoicePacket)

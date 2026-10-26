@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(OpenTalk
-    VERSION 0.1.0
+    VERSION 1.0.0
     DESCRIPTION "Open-source voice, text and file transfer platform"
     HOMEPAGE_URL "https://github.com/mheesen65/OpenTalk"
     LANGUAGES CXX)
@@ -36,6 +36,33 @@ option(OPENTALK_BUILD_TESTS "Build the unit tests" ON)
 # Static Qt builds cannot be redistributed under LGPLv3 without extra
 # obligations; the portable package links Qt dynamically. See README.
 find_package(Qt6 6.2 REQUIRED COMPONENTS Core Network)
+
+# Opus is a hard requirement: it is the only audio codec the protocol carries.
+find_path(OPUS_INCLUDE_DIR opus/opus.h)
+find_library(OPUS_LIBRARY NAMES opus)
+if(NOT OPUS_INCLUDE_DIR OR NOT OPUS_LIBRARY)
+    message(FATAL_ERROR
+        "libopus was not found. Install it (Debian/Ubuntu: libopus-dev, "
+        "macOS: brew install opus, Windows: vcpkg install opus:x64-windows) "
+        "or pass -DOPUS_INCLUDE_DIR and -DOPUS_LIBRARY explicitly.")
+endif()
+add_library(OpenTalk::Opus UNKNOWN IMPORTED)
+set_target_properties(OpenTalk::Opus PROPERTIES
+    IMPORTED_LOCATION "${OPUS_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${OPUS_INCLUDE_DIR}")
+
+option(OPENTALK_ENABLE_AUDIO "Build microphone/speaker support (needs Qt Multimedia)" ON)
+set(OPENTALK_AUDIO_DEVICES OFF)
+if(OPENTALK_ENABLE_AUDIO AND OPENTALK_BUILD_CLIENT)
+    find_package(Qt6 6.2 QUIET COMPONENTS Multimedia)
+    if(Qt6Multimedia_FOUND)
+        set(OPENTALK_AUDIO_DEVICES ON)
+    else()
+        message(WARNING
+            "Qt Multimedia not found: the client will build without "
+            "microphone/speaker support. Pass -DOPENTALK_ENABLE_AUDIO=OFF to silence this.")
+    endif()
+endif()
 
 add_subdirectory(sdk)
 

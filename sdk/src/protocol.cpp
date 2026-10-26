@@ -30,6 +30,19 @@ constexpr auto sender = "sender";
 constexpr auto text = "text";
 constexpr auto timestamp = "timestamp";
 constexpr auto nonce = "nonce";
+constexpr auto sequence = "seq";
+constexpr auto codec = "codec";
+constexpr auto data = "data";
+constexpr auto transferId = "transferId";
+constexpr auto fileName = "fileName";
+constexpr auto fileSize = "fileSize";
+constexpr auto sha256 = "sha256";
+constexpr auto chunkSize = "chunkSize";
+constexpr auto accepted = "accepted";
+constexpr auto reason = "reason";
+constexpr auto index = "index";
+constexpr auto last = "last";
+constexpr auto success = "success";
 } // namespace key
 
 quint32 toUInt(const QJsonValue &value)
@@ -132,6 +145,111 @@ TextEvent TextEvent::fromJson(const QJsonObject &json)
     event.text = json.value(QLatin1String(key::text)).toString();
     event.timestampMs = json.value(QLatin1String(key::timestamp)).toInteger(0);
     return event;
+}
+
+QJsonObject VoicePacket::toJson() const
+{
+    return QJsonObject{
+        {QLatin1String(key::channelId), static_cast<qint64>(channelId)},
+        {QLatin1String(key::senderId), static_cast<qint64>(senderId)},
+        {QLatin1String(key::sender), sender},
+        {QLatin1String(key::sequence), static_cast<qint64>(sequence)},
+        {QLatin1String(key::timestamp), timestampMs},
+        {QLatin1String(key::codec), QStringLiteral("opus")},
+        {QLatin1String(key::data), QString::fromLatin1(payload.toBase64())}};
+}
+
+VoicePacket VoicePacket::fromJson(const QJsonObject &json)
+{
+    VoicePacket packet;
+    packet.channelId = toUInt(json.value(QLatin1String(key::channelId)));
+    packet.senderId = toUInt(json.value(QLatin1String(key::senderId)));
+    packet.sender = json.value(QLatin1String(key::sender)).toString();
+    packet.sequence = toUInt(json.value(QLatin1String(key::sequence)));
+    packet.timestampMs = json.value(QLatin1String(key::timestamp)).toInteger(0);
+    packet.payload = QByteArray::fromBase64(
+        json.value(QLatin1String(key::data)).toString().toLatin1());
+    return packet;
+}
+
+QJsonObject FileOffer::toJson() const
+{
+    return QJsonObject{{QLatin1String(key::transferId), transferId},
+                       {QLatin1String(key::channelId), static_cast<qint64>(channelId)},
+                       {QLatin1String(key::senderId), static_cast<qint64>(senderId)},
+                       {QLatin1String(key::sender), sender},
+                       {QLatin1String(key::fileName), fileName},
+                       {QLatin1String(key::fileSize), fileSize},
+                       {QLatin1String(key::sha256), sha256},
+                       {QLatin1String(key::chunkSize), chunkSize}};
+}
+
+FileOffer FileOffer::fromJson(const QJsonObject &json)
+{
+    FileOffer offer;
+    offer.transferId = json.value(QLatin1String(key::transferId)).toString();
+    offer.channelId = toUInt(json.value(QLatin1String(key::channelId)));
+    offer.senderId = toUInt(json.value(QLatin1String(key::senderId)));
+    offer.sender = json.value(QLatin1String(key::sender)).toString();
+    offer.fileName = json.value(QLatin1String(key::fileName)).toString();
+    offer.fileSize = json.value(QLatin1String(key::fileSize)).toInteger(0);
+    offer.sha256 = json.value(QLatin1String(key::sha256)).toString();
+    const int size = json.value(QLatin1String(key::chunkSize)).toInt(kDefaultChunkSize);
+    offer.chunkSize = size > 0 ? size : kDefaultChunkSize;
+    return offer;
+}
+
+QJsonObject FileResponse::toJson() const
+{
+    return QJsonObject{{QLatin1String(key::transferId), transferId},
+                       {QLatin1String(key::accepted), accepted},
+                       {QLatin1String(key::reason), reason}};
+}
+
+FileResponse FileResponse::fromJson(const QJsonObject &json)
+{
+    FileResponse response;
+    response.transferId = json.value(QLatin1String(key::transferId)).toString();
+    response.accepted = json.value(QLatin1String(key::accepted)).toBool(false);
+    response.reason = json.value(QLatin1String(key::reason)).toString();
+    return response;
+}
+
+QJsonObject FileChunk::toJson() const
+{
+    return QJsonObject{{QLatin1String(key::transferId), transferId},
+                       {QLatin1String(key::senderId), static_cast<qint64>(senderId)},
+                       {QLatin1String(key::index), static_cast<qint64>(index)},
+                       {QLatin1String(key::last), last},
+                       {QLatin1String(key::data), QString::fromLatin1(data.toBase64())}};
+}
+
+FileChunk FileChunk::fromJson(const QJsonObject &json)
+{
+    FileChunk chunk;
+    chunk.transferId = json.value(QLatin1String(key::transferId)).toString();
+    chunk.senderId = toUInt(json.value(QLatin1String(key::senderId)));
+    chunk.index = toUInt(json.value(QLatin1String(key::index)));
+    chunk.last = json.value(QLatin1String(key::last)).toBool(false);
+    chunk.data = QByteArray::fromBase64(
+        json.value(QLatin1String(key::data)).toString().toLatin1());
+    return chunk;
+}
+
+QJsonObject FileComplete::toJson() const
+{
+    return QJsonObject{{QLatin1String(key::transferId), transferId},
+                       {QLatin1String(key::success), success},
+                       {QLatin1String(key::reason), reason}};
+}
+
+FileComplete FileComplete::fromJson(const QJsonObject &json)
+{
+    FileComplete complete;
+    complete.transferId = json.value(QLatin1String(key::transferId)).toString();
+    complete.success = json.value(QLatin1String(key::success)).toBool(true);
+    complete.reason = json.value(QLatin1String(key::reason)).toString();
+    return complete;
 }
 
 QByteArray encodeFrame(const Message &message)
@@ -272,6 +390,46 @@ Message text(quint32 channelId, quint32 senderId, const QString &sender,
     Message message;
     message.type = MessageType::TextMessage;
     message.body = event.toJson();
+    return message;
+}
+
+Message voice(const VoicePacket &packet)
+{
+    Message message;
+    message.type = MessageType::VoiceFrame;
+    message.body = packet.toJson();
+    return message;
+}
+
+Message fileOffer(const FileOffer &offer)
+{
+    Message message;
+    message.type = MessageType::FileOffer;
+    message.body = offer.toJson();
+    return message;
+}
+
+Message fileResponse(const FileResponse &response)
+{
+    Message message;
+    message.type = MessageType::FileResponse;
+    message.body = response.toJson();
+    return message;
+}
+
+Message fileChunk(const FileChunk &chunk)
+{
+    Message message;
+    message.type = MessageType::FileChunk;
+    message.body = chunk.toJson();
+    return message;
+}
+
+Message fileComplete(const FileComplete &complete)
+{
+    Message message;
+    message.type = MessageType::FileComplete;
+    message.body = complete.toJson();
     return message;
 }
 

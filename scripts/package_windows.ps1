@@ -86,7 +86,25 @@ Copy-Item (Join-Path $binDir '*') $portableDir -Recurse
 Copy-Item (Join-Path $repoRoot 'LICENSE') $portableDir
 Copy-Item (Join-Path $repoRoot 'README.md') $portableDir
 
-$version = '0.1.0'
+# Opus is a direct dependency of the SDK, so its DLL has to travel with the
+# binaries. Look where vcpkg and the Qt kit put it.
+$opusCandidates = @(
+    (Join-Path $QtDir 'bin/opus.dll'),
+    $env:OPUS_DLL,
+    (Join-Path $env:VCPKG_ROOT 'installed/x64-windows/bin/opus.dll'),
+    (Join-Path $env:VCPKG_ROOT 'installed/x64-windows-release/bin/opus.dll'),
+    (Join-Path $env:VCPKG_INSTALLATION_ROOT 'installed/x64-windows/bin/opus.dll'),
+    (Join-Path $env:VCPKG_INSTALLATION_ROOT 'installed/x64-windows-release/bin/opus.dll')
+) | Where-Object { $_ -and (Test-Path $_) }
+
+if ($opusCandidates.Count -gt 0) {
+    Copy-Item $opusCandidates[0] $portableDir
+    Write-Host "==> Bundled $($opusCandidates[0])"
+} else {
+    Write-Warning "opus.dll was not found. Set OPUS_DLL or install opus via vcpkg; the packaged client will not start without it."
+}
+
+$version = '1.0.0'
 $zipPath = Join-Path $distDir "OpenTalk-$version-portable.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 

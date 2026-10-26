@@ -1,6 +1,5 @@
 # Build trees
-build/
-build-*/
+build*/
 out/
 dist/
 cmake-build-*/

@@ -8,7 +8,7 @@ int main(int argc, char *argv[])
     QApplication::setApplicationName(QStringLiteral("OpenTalk"));
     QApplication::setApplicationDisplayName(QStringLiteral("OpenTalk"));
     QApplication::setOrganizationName(QStringLiteral("OpenTalk"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationVersion(QStringLiteral("1.0.0"));
 
     MainWindow window;
     window.resize(1000, 640);
