@@ -70,6 +70,37 @@ channel. Accepted files land in your Downloads folder.
 Server options: `--port`, `--name`, `--max-users`, `--idle-timeout`. The server
 shuts down gracefully on Ctrl+C, notifying connected clients.
 
+## Host on your home network (no port forwarding needed)
+
+Devices on the same Wi-Fi or router can connect to a server on your machine
+without any port forwarding. Port forwarding is only needed to reach the server
+from the internet.
+
+1. Start the server on the machine that will host:
+
+   ```bash
+   ./OpenTalkServer --port 10333 --name "Living Room"
+   ```
+
+   It prints every address it is reachable on, for example:
+
+   ```
+   Use one of these addresses in the client, from any device on the same network:
+       192.168.1.42:10333
+   ```
+
+2. On the other device, open the client, enter that address and port `10333`,
+   pick a nickname, and connect.
+
+3. Windows will ask the first time whether to allow the server through the
+   firewall. Choose **Private networks** (not Public). If the prompt was
+   dismissed, re-enable it under *Windows Security → Firewall & network
+   protection → Allow an app through firewall*.
+
+If the client cannot connect: confirm both devices are on the same subnet,
+that the address is the host's LAN address (not `127.0.0.1`), and that the
+firewall rule allows the port on private networks.
+
 ## Portable ZIP
 
 ```powershell

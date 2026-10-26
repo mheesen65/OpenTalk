@@ -33,6 +33,14 @@ if [[ -d "${stage_dir}/lib" ]]; then
     cp -a "${stage_dir}/lib/." "${portable_dir}/"
 fi
 cp "${repo_root}/LICENSE" "${repo_root}/README.md" "${portable_dir}/"
+cp "${repo_root}/CHANGELOG.md" "${repo_root}/CONTRIBUTING.md" \
+   "${repo_root}/SECURITY.md" "${portable_dir}/"
+
+# Documentation and SDK development files travel with the binaries so the
+# archive is usable both to run OpenTalk and to build against its SDK.
+mkdir -p "${portable_dir}/docs" "${portable_dir}/sdk/include"
+cp -a "${repo_root}/docs/." "${portable_dir}/docs/"
+cp -a "${repo_root}/sdk/include/." "${portable_dir}/sdk/include/"
 
 # Resolve dependencies from the *build* tree. Installed binaries have an
 # $ORIGIN-only rpath, so ldd on them cannot find the Qt kit or Opus, while the

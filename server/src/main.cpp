@@ -1,5 +1,6 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QNetworkInterface>
 #include <QTextStream>
 
 #include "Server.h"
@@ -16,6 +17,31 @@
 #endif
 
 namespace {
+
+/// Every non-loopback IPv4 address this machine can be reached on. Printed at
+/// startup so a LAN user does not have to hunt for the host's address, which is
+/// the usual reason "it does not work" on a home network.
+QStringList lanAddresses()
+{
+    QStringList addresses;
+    const auto interfaces = QNetworkInterface::allInterfaces();
+    for (const QNetworkInterface &interface : interfaces) {
+        const auto flags = interface.flags();
+        if (!(flags & QNetworkInterface::IsUp) || !(flags & QNetworkInterface::IsRunning)
+            || (flags & QNetworkInterface::IsLoopBack)) {
+            continue;
+        }
+        const auto entries = interface.addressEntries();
+        for (const QNetworkAddressEntry &entry : entries) {
+            const QHostAddress address = entry.ip();
+            if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLoopback()) {
+                addresses.append(address.toString());
+            }
+        }
+    }
+    addresses.removeDuplicates();
+    return addresses;
+}
 
 #ifdef Q_OS_UNIX
 int g_signalFd[2] = {-1, -1};
@@ -111,6 +137,18 @@ int main(int argc, char *argv[])
     QTextStream(stdout) << "OpenTalk server \"" << config.name << "\" listening on port "
                         << server.port() << " (max " << config.maxUsers << " users, idle timeout "
                         << idleSeconds << "s)\n";
+
+    const QStringList lan = lanAddresses();
+    if (lan.isEmpty()) {
+        QTextStream(stdout) << "LAN addresses: none detected - is this machine connected "
+                               "to a network?\n";
+    } else {
+        QTextStream(stdout) << "Use one of these addresses in the client, from any device on "
+                               "the same network:\n";
+        for (const QString &address : lan) {
+            QTextStream(stdout) << "    " << address << ':' << server.port() << '\n';
+        }
+    }
     QTextStream(stdout).flush();
 
 #ifdef Q_OS_UNIX

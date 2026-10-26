@@ -85,6 +85,19 @@ New-Item -ItemType Directory -Path $portableDir | Out-Null
 Copy-Item (Join-Path $binDir '*') $portableDir -Recurse
 Copy-Item (Join-Path $repoRoot 'LICENSE') $portableDir
 Copy-Item (Join-Path $repoRoot 'README.md') $portableDir
+Copy-Item (Join-Path $repoRoot 'CHANGELOG.md') $portableDir
+Copy-Item (Join-Path $repoRoot 'CONTRIBUTING.md') $portableDir
+Copy-Item (Join-Path $repoRoot 'SECURITY.md') $portableDir
+
+# Documentation and SDK headers, so the archive can also be used to build a
+# client against the bundled SDK.
+Copy-Item (Join-Path $repoRoot 'docs') (Join-Path $portableDir 'docs') -Recurse
+New-Item -ItemType Directory -Force -Path (Join-Path $portableDir 'sdk/include') | Out-Null
+Copy-Item (Join-Path $repoRoot 'sdk/include/*') (Join-Path $portableDir 'sdk/include') -Recurse
+if (Test-Path (Join-Path $stageDir 'lib')) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $portableDir 'sdk/lib') | Out-Null
+    Copy-Item (Join-Path $stageDir 'lib/*') (Join-Path $portableDir 'sdk/lib') -Recurse
+}
 
 # Opus is a direct dependency of the SDK, so its DLL has to travel with the
 # binaries. Look where vcpkg and the Qt kit put it.
